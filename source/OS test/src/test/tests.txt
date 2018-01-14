@@ -1,0 +1,11 @@
+Small allocation:
+
+Allocate 15 128byte blocks			-ok
+Allocate 16 128byte blocks 
+without expand(gives 0 as last pointer)		-ok
+Allocate 24 256byte blocks			-not ok only 16 allocate?
+Allocate 25 256byte blocks 
+without expand(gives 0 as last pointer)		-not ok
+Allocate 16 512byte blocks			-ok
+Allocate 17 512byte blocks 
+without expand(gives 0 as last pointer)		-ok

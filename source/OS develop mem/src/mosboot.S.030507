@@ -1,0 +1,283 @@
+//* File: mosboot.asm
+//* This file contains the boot up sequence
+//* it reads the kernel from the disk
+//* sets up protected mode and jumps to
+//* kernel
+//* This BOOT is written with tributes from PolyOS BOOT
+//* Created: 2003-04-06 Markus Svensson
+//* Modified:
+//------------------------------------------------------------------------
+//MOS boot
+//------------------------------------------------------------------------
+
+IDTOFFSET = 0x2000
+KERNELOFFSET = 0x4000
+.code16       //the bios starts out in 16-bit real mode
+.text
+.org 0, 0
+
+//------------------------------------------------------------------------
+//SECTOR ONE: THE BOOT LOADER
+//------------------------------------------------------------------------
+
+jmp _start       	//skip over our data and functions
+
+//------------------------------------------------------------------------
+//Data used in the boot-loading process
+//------------------------------------------------------------------------
+        //User messages
+_bootdrv:
+        .byte 0
+_bootmsg:
+        .string "MOS version 0.01\n\r\0"
+_loadmsg:
+        .string "Loading OS\n\r\0"
+_rebootmsg:
+        .string "Press any key to reboot\n\r\0"
+_readmsg:
+	.string "Reading OS disk\n\r\0"
+_readmsg2:
+	.string "OS disk read\n\r\0"
+_pmodemsg:
+        .string "Starting MOS kernel...\n\r\0"
+
+        //Here's the locations of my IDT and GDT.  Remember, Intel's are
+        //little endian processors, therefore, these are in reversed order.
+        //Also note that lidt and lgdt accept a 32-bit address and 16-bit 
+        //limit, therefore, these are 48-bit variables.
+
+idtr:
+	.word 0x07ff         //limit of 256 IDT slots
+        .long IDTOFFSET      //starting at IDTOFFSET
+
+
+//------------------------------------------------------------------------
+//Functions used in the boot-loading process
+//------------------------------------------------------------------------
+        //Message writes data in ds:si to screen
+        //End character is NULL
+        message:                        //Dump ds:si to screen.
+                lodsb                   //load byte at ds:si into al
+                orb   %al,%al           //test if character is 0 (end)
+                jz    done
+                movb  $0x0e, %ah        //put character
+                movw  $7, %bx           //attribute
+                int   $0x10             //call BIOS
+                jmp   message
+        done:
+                ret
+
+	//Getkey
+        //holds processor until user press a key on keyboard
+        getkey:
+                movb  $0, %ah           //wait for key
+                int   $0x16
+                ret
+
+//      ------------------------------------------------------------------     
+        //Reboot
+        //Reboots the system when the user pressed a key system   
+        reboot:
+                movw   $_rebootmsg, %si    //be polite, and say we're rebooting
+                call   message
+                call   getkey            //and even wait for a key :)
+
+                .byte 0xEA               //machine language to jump to FFFF:0000 (reboot)
+                .word 0x0000
+                .word 0xFFFF
+                // Rebooting, no ret required
+//      ------------------------------------------------------------------     
+        //read_from_disc
+        //Reads data from disc
+        //Input must be es:bx which is the destination address
+        //cx is from sector
+        //al is number of sectors to read
+	read_from_disc:
+		movw	$5, %di		//Retry to read for 5 times
+
+	        //I could condense a few of these high/low 8-bit movs into one 16-bit
+	        //mov, but, for simplicity, I'll leave it as is, unless necessary.
+	        movb 	$0x2, %ah         //load two block (one sectors)
+	        movb 	$0, %dh         //head = 0 = s	ide one
+	        movb 	(_bootdrv), %dl  //disk = what we booted from
+	
+    	        pushw	%di		//Save retry counter
+		int 	$0x13
+		popw	%di		//Restore retry counter
+        	jnb 	read_me_ok	//On no errors return from read_me
+		xorb 	%al, %al        //if there's an error then we'll try again.
+                int	$0x13    	//Often there is not error but requires a few
+		decw 	%di
+                jnz	read_from_disc	//tries.  Ofcourse, this may end up as an 
+		jmp	reboot
+
+.org 0x150
+                                //infinite loop... but only on a bad disk...
+read_me_ok:
+		ret
+//      ------------------------------------------------------------------     
+	// This procedure turns off the floppy drive motor, so
+	// that we enter the kernel in a known state, and
+	// don't have to worry about it later.
+	// From linux
+
+	kill_motor:
+		pushw %dx
+		movw $0x3f2, %dx
+		movb $0, %al
+		//out
+		popw %dx
+		ret 
+
+//------------------------------------------------------------------------
+//The actual code of our boot loading process
+//------------------------------------------------------------------------
+_start:
+        movl   $0x7c0,%eax       //BIOS puts us at 0:07C00h, so set DS accordinly
+        movw   %ax, %ds         //Therefore, we don't have to add 07C00h to all our data
+
+        movb   %dl, (_bootdrv)   //quickly save what drive we booted from
+
+        cli                     //clear interrupts while we setup a stack
+        movw   $0x9000, %ax     //put stack on 0x90000
+        movw   %ax, %ss
+        movw   $0xffff, %sp     //let's use the whole segment.  Why not?  We can :)
+        sti                     //put our interrupts back on
+        
+        //Interestingly enough, apparently the processor will disable 
+        //interupts itself when you directly access the stack segment!
+        //Atleast it does in protected mode, I'm not sure about real mode.
+        
+        movw $_bootmsg, %si       //display our startup message
+        call message
+
+//.code32 //use 386 instructions from now on (I don't want to manually include
+        //operand-size(66h) or address-size(67h) prefixes... it's annoying :)
+
+        movw   $_loadmsg, %si     //tell the user we're loading the kernel
+        call   message
+
+
+	//then load in the MOS kernel at the kernel offset
+	movw 	$KERNELOFFSET/0x10-0x20, %ax 
+//	movw 	$0x7000, %ax 
+
+	movw   %ax, %es
+	xorw   %bx, %bx        //set bx 0 bx is the offset in the segment
+	movb   $0x10, %al      //Number of sectors to read
+
+	movw   $0x02, %cx      //Read from sector 2
+
+	call   read_from_disc  //Read from driver
+
+	movw 	$_readmsg, %si
+	call 	message
+
+
+//	call 	kill_motor
+
+	//Point to gdtr in the boot
+	movw 	%ds, %bx                    //BX=segment
+	shll 	$4, %ebx                    //BX="linear" address of segment base
+/*	leal 	gdt(%ebx), %eax
+	movl	%eax, (gdtr+2) */
+
+        
+	cli
+
+        //set A20 line
+        xorw   %cx, %cx
+clear_buf:
+        inb    $0x64, %al	//get input from keyboard status port
+        testb  $0x02, %al	//test the buffer full flag
+        loopnz clear_buf        //loop until buffer is empty
+        movb   $0xd1, %al 	//keyboard: write to output port
+        outb   %al, $0x64	//output command to keyboard
+clear_buf2:
+        inb    $0x64, %al	//wait 'till buffer is empty again
+        testb  $0x02, %al
+        loopnz clear_buf2
+        movb   $0xdf, %al	//keyboard: set A20
+        outb   %al, $0x60	//send it to the keyboard controller
+        movw   $0x14, %cx
+wait_kbc:                       //this is approx. a 25uS delay to wait
+        outb   %al, $0xed       //for the kb controler to execute our 
+        loop   wait_kbc		//command.
+
+        //the A20 line is on now.  Let's load in our IDT and GDT tables...
+//        lgdt (gdtr)
+
+
+        //now let's enter pmode...
+        movw $_pmodemsg, %si
+        call message
+
+	movl $0xfff, %ecx	//Sätter en räknare till loopen
+enloop:	loop enloop		//Bochs hänger inte med så man får vänta lite 
+//.org 0x150	// org put in for debugging purpose
+
+	
+/*	movl %cr0, %eax            //load the control register in
+        orb  $0x1, %al               //set bit 1: pmode bit
+        mov %eax, %cr0            //copy it back to the control register */
+	
+//        lidt (idtr)		//Set up the IDTR
+
+/*	jmp flush
+flush: */
+
+
+        //jump to the kernel that we've loaded in...
+	//ljmp 	 SYS_CODE_SEL, KERNELOFFSET
+ljmp	$0, $KERNELOFFSET
+stop:
+jmp	stop
+/*//;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+//;	global descriptor table (GDT)
+//;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+gdtr:	.word gdt_end - gdt - 1	//GDT limit
+	.long gdt+0x7c00        //GDT base gets set above
+
+//null descriptor
+gdt:	.word 0			//limit 15:0
+	.word 0			//base 15:0
+	.byte 0			//base 23:16
+	.byte 0			//type
+	.byte 0			//limit 19:16, flags
+	.byte 0			//base 31:24
+
+//linear data segment descriptor
+gdt1:
+.equ LINEAR_SEL, gdt1-gdt
+	.word 0xFFFF		//limit 0xFFFFF
+	.word 0			//base 0
+	.byte 0
+	.byte 0x92		//present, ring 0, data, expand-up, writable
+        .byte 0x4F              //page-granular, 32-bit
+	.byte 0
+//code segment descriptor for the OS kernel
+
+.equ SYS_CODE_SEL, gdt2-gdt
+gdt2:   .word 0xffff	        //limit 0xFFFFF
+	.word 0x0000		//(base gets set above)
+	.byte 0b00000000	//00000000h
+	.byte 0b10011101 	//present, ring 0, code, non-conforming, readable
+        .byte 0b01011111	//page-granular, 32-bit
+
+	.byte 0x00
+
+//data segment descriptor
+gdt3:
+.equ SYS_DATA_SEL, gdt3-gdt
+	.word	0xFFFF		//limit: 0xfffff
+	.word 	0x0000		//base:  0x00001000
+	.byte	0x00		//[philippo] I think this should start at address 0
+	.byte	0b10010010
+	.byte	0b01001111
+	.byte 	0x00
+
+gdt_end: */
+        //The boot sector is supposed to have to have 0xAA55 at the end of 
+        //the sector (the word at 510 bytes) to be loaded by the BIOS...
+        .org 510, 0
+        .word 0xAA55
